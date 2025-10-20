@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -30,18 +29,22 @@ type AurPackage struct {
 }
 
 func main() {
-	interval := *flag.Int("interval", 10, "Set the interval between updates in seconds.")
-	intervalSync := *flag.Int("interval-sync", 600, "Set the interval between sync updates in seconds.")
-	skipAur := *flag.Bool("skip-aur", false, "Skips checking for AUR updates.")
-	rawOutput := *flag.Bool("raw-output", false, "Disables formating tooltip text into columns.")
-	noColor := *flag.Bool("no-color", false, "Disables coloring packages by version category.")
-	colors := []string{
-		*flag.String("color-major", "f7768e", "Color used for major version update, ignored if -no-color is present."),
-		*flag.String("color-minor", "ff9e64", "Color used for minor version update, ignored if -no-color is present."),
-		*flag.String("color-patch", "e0af68", "Color used for patch update, ignored if -no-color is present."),
-		*flag.String("color-pre", "9ece6a", "Color used for pre update, ignored if -no-color is present."),
-		*flag.String("color-other", "7dcfff", "Color used for some other update, ignored if -no-color is present."),
-	}
+	var (
+		interval, intervalSync                                   int
+		skipAur, rawOutput, noColor                              bool
+		colorMajor, colorMinor, colorPatch, colorPre, colorOther string
+	)
+	flag.IntVar(&interval, "interval", 10, "Set the interval between updates in seconds.")
+	flag.IntVar(&intervalSync, "interval-sync", 300, "Set the interval between sync updates in seconds.")
+	flag.BoolVar(&skipAur, "skip-aur", false, "Skips checking for AUR updates.")
+	flag.BoolVar(&rawOutput, "raw-output", false, "Disables formating tooltip text into columns.")
+	flag.BoolVar(&noColor, "no-color", false, "Disables coloring packages by version category.")
+	flag.StringVar(&colorMajor, "color-major", "f7768e", "Color used for major version update, ignored if -no-color is present.")
+	flag.StringVar(&colorMinor, "color-minor", "ff9e64", "Color used for minor version update, ignored if -no-color is present.")
+	flag.StringVar(&colorPatch, "color-patch", "e0af68", "Color used for patch update, ignored if -no-color is present.")
+	flag.StringVar(&colorPre, "color-pre", "9ece6a", "Color used for pre update, ignored if -no-color is present.")
+	flag.StringVar(&colorOther, "color-other", "7dcfff", "Color used for some other update, ignored if -no-color is present.")
+	colors := []string{colorMajor, colorMinor, colorPatch, colorPre, colorOther}
 
 	flag.Parse()
 
@@ -52,19 +55,35 @@ func main() {
 
 	encoder := json.NewEncoder(os.Stdout)
 	result := &Result{"0", "Checking for updates...", "has-updates", "has-updates"}
-	chanUpdates := make(chan []string)
-	go getUpdates(
-		chanUpdates,
-		intervalSync/interval,
-		time.Duration(interval)*time.Second,
-		skipAur,
-	)
+	updates := make([]string, 0, 50)
+	chPacmanUpdates := make(chan []string)
+	chAurUpdates := make(chan []string)
+	updateOnIter := intervalSync / interval
+	intervalDuration := time.Duration(interval) * time.Second
+	go checkUpdates(chPacmanUpdates, updateOnIter, intervalDuration)
+	if !skipAur {
+		go checkAurUpdates(chAurUpdates, updateOnIter, intervalDuration)
+	}
+	var updatesAur, updatesPac []string
 
 	for {
 		if encoder.Encode(result) != nil {
 			os.Exit(2)
 		}
-		updates := <-chanUpdates
+		select {
+		case tempPac := <-chPacmanUpdates:
+			if tempPac != nil {
+				updatesPac = tempPac
+			}
+		case tempAur := <-chAurUpdates:
+			if tempAur != nil {
+				updatesAur = tempAur
+			}
+		}
+		updates = updates[:0]
+		updates = append(updates, updatesPac...)
+		updates = append(updates, updatesAur...)
+
 		if len(updates) == 0 {
 			result.Text = ""
 			result.Tooltip = "All packages are up to date"
@@ -79,30 +98,6 @@ func main() {
 		result.Tooltip = strings.Join(updates, "\n")
 		result.Class = "has-updates"
 		result.Alt = "has-updates"
-	}
-}
-
-func getUpdates(ch chan<- []string, updateOnIter int, intervalDuration time.Duration, skipAur bool) {
-	updates := make([]string, 0, 50)
-	var updatesPac, updatesAur []string
-	iter := updateOnIter - 1
-	for {
-		if iter == updateOnIter {
-			updatesPac = checkUpdates(true)
-			if !skipAur {
-				updatesAur = checkAurUpdates()
-			}
-			iter = 0
-		} else {
-			updatesPac = checkUpdates(false)
-		}
-
-		updates = updates[:0]
-		updates = append(updates, updatesPac...)
-		updates = append(updates, updatesAur...)
-		ch <- updates
-		time.Sleep(intervalDuration)
-		iter++
 	}
 }
 
@@ -151,82 +146,85 @@ func parseVersion(oldVersion, newVersion string) int {
 	return dotCounter
 }
 
-func checkUpdates(sync bool) []string {
+func checkUpdates(chUpdates chan<- []string, updateOnIter int, intervalDuration time.Duration) {
 	var cmd *exec.Cmd
-	if sync {
-		cmd = exec.Command("checkupdates", "--nocolor")
-	} else {
-		cmd = exec.Command("checkupdates", "--nosync", "--nocolor")
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return []string{fmt.Sprintf("Failed to create stdout pipe: %v", err)}
-	}
-	if err := cmd.Start(); err != nil {
-		return []string{fmt.Sprintf("Failed to start command: %v", err)}
-	}
-	var out bytes.Buffer
-	if _, err := io.Copy(&out, stdout); err != nil {
-		return []string{fmt.Sprintf("Failed to read stdout: %v", err)}
-	}
-	if err := cmd.Wait(); err != nil {
-		if exiterr, ok := err.(*exec.ExitError); ok && exiterr.ExitCode() == 2 {
-			return nil
+	iter := updateOnIter
+	for {
+		if iter == updateOnIter {
+			cmd = exec.Command("checkupdates", "--nocolor")
+			iter = 0
 		} else {
-			return []string{fmt.Sprintf("Goddangit: %v", err)}
+			cmd = exec.Command("checkupdates", "--nosync", "--nocolor")
 		}
-	}
-	/*
+		iter++
 		output, err := cmd.Output()
 		if err != nil {
 			if exiterr, ok := err.(*exec.ExitError); ok && exiterr.ExitCode() == 2 {
-				return nil
+				chUpdates <- nil
 			} else {
-				return []string{fmt.Sprintf("Unexpected: %v", err)}
+				chUpdates <- nil
+				// chUpdates <- []string{fmt.Sprintf("Unexpected: %v", err)}
 			}
-		}*/
-
-	return strings.Split(strings.TrimSpace(out.String()), "\n")
+		} else {
+			chUpdates <- strings.Split(strings.TrimSpace(string(output)), "\n")
+		}
+		time.Sleep(intervalDuration)
+	}
 }
 
-func checkAurUpdates() []string {
-	output, err := exec.Command("pacman", "-Qm").Output()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error running pacman -Qm: %v\n", err)
-		return []string{fmt.Sprintf("Error running pacman -Qm: %v", err)}
-	}
-
-	if len(output) == 0 {
-		return []string{"Nothing from aur installed"}
-	}
-
-	localPackages := make(map[string]string)
-	for line := range strings.SplitSeq(string(output), "\n") {
-		parts := strings.Fields(line)
-		if len(parts) >= 2 {
-			localPackages[parts[0]] = parts[1]
+func checkAurUpdates(chUpdates chan<- []string, updateOnIter int, intervalDuration time.Duration) {
+	iter := updateOnIter
+	firstCall := true
+	for {
+		if firstCall {
+			firstCall = false
+		} else {
+			time.Sleep(intervalDuration)
 		}
-	}
-
-	packageNames := make([]string, 0, len(localPackages))
-	for name := range localPackages {
-		packageNames = append(packageNames, name)
-	}
-
-	aurPackages, err := queryAurAPI(packageNames)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error querying AUR API: %v\n", err)
-		return []string{fmt.Sprintf("Error querying AUR API: %v", err)}
-	}
-
-	var updates []string
-	for _, aurPkg := range aurPackages {
-		if aurPkg.Version != localPackages[aurPkg.Name] {
-			updates = append(updates, fmt.Sprintf("aur/%s %s -> %s", aurPkg.Name, localPackages[aurPkg.Name], aurPkg.Version))
+		if iter != updateOnIter {
+			iter++
+			chUpdates <- nil
+			continue
 		}
-	}
+		iter = 1
+		output, err := exec.Command("pacman", "-Qm").Output()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error running pacman -Qm: %v\n", err)
+			chUpdates <- []string{fmt.Sprintf("Error running pacman -Qm: %v", err)}
+		}
 
-	return updates
+		if len(output) == 0 {
+			chUpdates <- []string{"Nothing from aur installed"}
+		}
+
+		localPackages := make(map[string]string)
+		for line := range strings.SplitSeq(string(output), "\n") {
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				localPackages[parts[0]] = parts[1]
+			}
+		}
+
+		packageNames := make([]string, 0, len(localPackages))
+		for name := range localPackages {
+			packageNames = append(packageNames, name)
+		}
+
+		aurPackages, err := queryAurAPI(packageNames)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error querying AUR API: %v\n", err)
+			chUpdates <- []string{fmt.Sprintf("Error querying AUR API: %v", err)}
+		}
+
+		var updates []string
+		for _, aurPkg := range aurPackages {
+			if aurPkg.Version != localPackages[aurPkg.Name] {
+				updates = append(updates, fmt.Sprintf("aur/%s %s -> %s", aurPkg.Name, localPackages[aurPkg.Name], aurPkg.Version))
+			}
+		}
+
+		chUpdates <- updates
+	}
 }
 
 func queryAurAPI(packageNames []string) ([]AurPackage, error) {
