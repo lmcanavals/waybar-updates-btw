@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -84,7 +85,7 @@ func main() {
 func getUpdates(ch chan<- []string, updateOnIter int, intervalDuration time.Duration, skipAur bool) {
 	updates := make([]string, 0, 50)
 	var updatesPac, updatesAur []string
-	iter := updateOnIter
+	iter := updateOnIter - 1
 	for {
 		if iter == updateOnIter {
 			updatesPac = checkUpdates(true)
@@ -98,9 +99,7 @@ func getUpdates(ch chan<- []string, updateOnIter int, intervalDuration time.Dura
 
 		updates = updates[:0]
 		updates = append(updates, updatesPac...)
-		if !skipAur {
-			updates = append(updates, updatesAur...)
-		}
+		updates = append(updates, updatesAur...)
 		ch <- updates
 		time.Sleep(intervalDuration)
 		iter++
@@ -111,6 +110,7 @@ func addFormat(updates, colors []string, rawOutput, noColor bool) {
 	allParts := make([][]string, len(updates))
 	maxNameLen := 0
 	maxVersionLen := 0
+	var formatStr strings.Builder
 	for i, line := range updates {
 		allParts[i] = strings.Fields(line)
 		if len(allParts[i]) != 4 {
@@ -123,19 +123,17 @@ func addFormat(updates, colors []string, rawOutput, noColor bool) {
 		if len(part) != 4 {
 			continue
 		}
-		if noColor {
-			formatStr := fmt.Sprintf("<span font-family='monospace'>%%-%ds %%-%ds -> %%s</span>", maxNameLen, maxVersionLen)
-			updates[i] = fmt.Sprintf(formatStr, part[0], part[1], part[3])
-			continue
+		fmt.Fprint(&formatStr, "<span font-family='monospace'")
+		if !noColor {
+			category := parseVersion(part[1], part[3])
+			fmt.Fprintf(&formatStr, " color='#%s'", colors[category])
 		}
-		category := parseVersion(part[1], part[3])
 		if rawOutput {
-			formatStr := fmt.Sprintf("<span font-family='monospace' color='#%s'>%%s %%s -> %%s</span>", colors[category])
-			updates[i] = fmt.Sprintf(formatStr, part[0], part[1], part[3])
-			continue
+			fmt.Fprintf(&formatStr, ">%%s %%s -> %%s</span>")
+		} else {
+			fmt.Fprintf(&formatStr, ">%%-%ds %%-%ds -> %%s</span>", maxNameLen, maxVersionLen)
 		}
-		formatStr := fmt.Sprintf("<span font-family='monospace' color='#%s'>%%-%ds %%-%ds -> %%s</span>", colors[category], maxNameLen, maxVersionLen)
-		updates[i] = fmt.Sprintf(formatStr, part[0], part[1], part[3])
+		updates[i] = fmt.Sprintf(formatStr.String(), part[0], part[1], part[3])
 	}
 }
 
@@ -160,16 +158,35 @@ func checkUpdates(sync bool) []string {
 	} else {
 		cmd = exec.Command("checkupdates", "--nosync", "--nocolor")
 	}
-	output, err := cmd.Output()
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		return []string{fmt.Sprintf("Failed to create stdout pipe: %v", err)}
+	}
+	if err := cmd.Start(); err != nil {
+		return []string{fmt.Sprintf("Failed to start command: %v", err)}
+	}
+	var out bytes.Buffer
+	if _, err := io.Copy(&out, stdout); err != nil {
+		return []string{fmt.Sprintf("Failed to read stdout: %v", err)}
+	}
+	if err := cmd.Wait(); err != nil {
 		if exiterr, ok := err.(*exec.ExitError); ok && exiterr.ExitCode() == 2 {
-			return []string{}
+			return nil
 		} else {
-			return []string{fmt.Sprintf("cmd.Wait: %v", err)}
+			return []string{fmt.Sprintf("Goddangit: %v", err)}
 		}
 	}
+	/*
+		output, err := cmd.Output()
+		if err != nil {
+			if exiterr, ok := err.(*exec.ExitError); ok && exiterr.ExitCode() == 2 {
+				return nil
+			} else {
+				return []string{fmt.Sprintf("Unexpected: %v", err)}
+			}
+		}*/
 
-	return strings.Split(strings.TrimSpace(string(output)), "\n")
+	return strings.Split(strings.TrimSpace(out.String()), "\n")
 }
 
 func checkAurUpdates() []string {
