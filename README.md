@@ -1,0 +1,2 @@
+# waybar-updates-btw
+Yet another module that shows Archlinux pacman available updates on waybar
