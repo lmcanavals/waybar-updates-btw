@@ -7,6 +7,7 @@
 *.dll
 *.so
 *.dylib
+waybar-updates-btw
 
 # Test binary, built with `go test -c`
 *.test
