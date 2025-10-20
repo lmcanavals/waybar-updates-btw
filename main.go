@@ -29,7 +29,7 @@ type AurPackage struct {
 }
 
 func main() {
-	interval := *flag.Int("interval", 5, "Set the interval between updates in seconds.")
+	interval := *flag.Int("interval", 10, "Set the interval between updates in seconds.")
 	intervalSync := *flag.Int("interval-sync", 600, "Set the interval between sync updates in seconds.")
 	skipAur := *flag.Bool("skip-aur", false, "Skips checking for AUR updates.")
 	rawOutput := *flag.Bool("raw-output", false, "Disables formating tooltip text into columns.")
@@ -49,48 +49,26 @@ func main() {
 		os.Exit(1)
 	}
 
-	intervalDuration := time.Duration(interval) * time.Second
-	updateOnIter := intervalSync / interval
-	iter := updateOnIter
 	encoder := json.NewEncoder(os.Stdout)
-	var (
-		result                 *Result
-		updatesPac, updatesAur []string
+	result := &Result{"0", "Checking for updates...", "has-updates", "has-updates"}
+	chanUpdates := make(chan []string)
+	go getUpdates(
+		chanUpdates,
+		intervalSync/interval,
+		time.Duration(interval)*time.Second,
+		skipAur,
 	)
 
-	updates := make([]string, 0, 50)
 	for {
-		if result != nil {
-			result.Alt = result.Class
-			if encoder.Encode(result) != nil {
-				os.Exit(2)
-			}
-			iter++
-			time.Sleep(intervalDuration)
-		} else {
-			result = new(Result)
+		if encoder.Encode(result) != nil {
+			os.Exit(2)
 		}
-
-		if iter == updateOnIter {
-			updatesPac = getUpdates(true)
-			if !skipAur {
-				updatesAur = getAurUpdates()
-			}
-			iter = 0
-		} else {
-			updatesPac = getUpdates(false)
-		}
-
-		updates = updates[:0]
-		updates = append(updates, updatesPac...)
-		if !skipAur {
-			updates = append(updates, updatesAur...)
-		}
-
+		updates := <-chanUpdates
 		if len(updates) == 0 {
 			result.Text = ""
 			result.Tooltip = "All packages are up to date"
 			result.Class = "updated"
+			result.Alt = "updated"
 			continue
 		}
 		if !rawOutput || !noColor {
@@ -99,6 +77,33 @@ func main() {
 		result.Text = fmt.Sprintf("%d", len(updates))
 		result.Tooltip = strings.Join(updates, "\n")
 		result.Class = "has-updates"
+		result.Alt = "has-updates"
+	}
+}
+
+func getUpdates(ch chan<- []string, updateOnIter int, intervalDuration time.Duration, skipAur bool) {
+	updates := make([]string, 0, 50)
+	var updatesPac, updatesAur []string
+	iter := updateOnIter
+	for {
+		if iter == updateOnIter {
+			updatesPac = checkUpdates(true)
+			if !skipAur {
+				updatesAur = checkAurUpdates()
+			}
+			iter = 0
+		} else {
+			updatesPac = checkUpdates(false)
+		}
+
+		updates = updates[:0]
+		updates = append(updates, updatesPac...)
+		if !skipAur {
+			updates = append(updates, updatesAur...)
+		}
+		ch <- updates
+		time.Sleep(intervalDuration)
+		iter++
 	}
 }
 
@@ -148,28 +153,30 @@ func parseVersion(oldVersion, newVersion string) int {
 	return dotCounter
 }
 
-func getUpdates(sync bool) []string {
-	var (
-		output []byte
-		err    error
-	)
+func checkUpdates(sync bool) []string {
+	var cmd *exec.Cmd
 	if sync {
-		output, err = exec.Command("checkupdates", "--nocolor").Output()
+		cmd = exec.Command("checkupdates", "--nocolor")
 	} else {
-		output, err = exec.Command("checkupdates", "--nosync", "--nocolor").Output()
+		cmd = exec.Command("checkupdates", "--nosync", "--nocolor")
 	}
+	output, err := cmd.Output()
 	if err != nil {
-		return []string{fmt.Sprintf("Fatal error executing checkupdates: %v\n", err)}
+		if exiterr, ok := err.(*exec.ExitError); ok && exiterr.ExitCode() == 2 {
+			return []string{}
+		} else {
+			return []string{fmt.Sprintf("cmd.Wait: %v", err)}
+		}
 	}
 
 	return strings.Split(strings.TrimSpace(string(output)), "\n")
 }
 
-func getAurUpdates() []string {
+func checkAurUpdates() []string {
 	output, err := exec.Command("pacman", "-Qm").Output()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error running pacman -Qm: %v\n", err)
-		return []string{fmt.Sprintf("Error running pacman -Qm: %v\n", err)}
+		return []string{fmt.Sprintf("Error running pacman -Qm: %v", err)}
 	}
 
 	if len(output) == 0 {
@@ -192,7 +199,7 @@ func getAurUpdates() []string {
 	aurPackages, err := queryAurAPI(packageNames)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error querying AUR API: %v\n", err)
-		return []string{fmt.Sprintf("Error querying AUR API: %v\n", err)}
+		return []string{fmt.Sprintf("Error querying AUR API: %v", err)}
 	}
 
 	var updates []string
