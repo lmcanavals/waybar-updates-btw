@@ -83,7 +83,7 @@ func main() {
 	// Helper to handle formatting and printing JSON to stdout
 	printStatus := func(updates []string) {
 		result := uIResult{
-			Text:    "",
+			Text:    "",
 			Tooltip: "All packages are up to date",
 			Class:   "updated",
 			Alt:     "updated",
@@ -98,7 +98,7 @@ func main() {
 				addFormat(formattedUpdates, colors, rawOutput, noColor)
 			}
 
-			result.Text = fmt.Sprintf("%d", len(updates))
+			result.Text = fmt.Sprintf("󰮯 %d", len(updates))
 			result.Tooltip = strings.Join(formattedUpdates, "\n")
 			result.Class = "has-updates"
 			result.Alt = "has-updates"
