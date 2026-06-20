@@ -211,7 +211,7 @@ func doAurCheck(chUpdates chan<- []string) {
 
 	for _, aurPkg := range aurPackages {
 		localVer, ok := localPackages[aurPkg.Name]
-		if ok && aurPkg.Version != localVer {
+		if ok && aurPkg.Version > localVer {
 			updates = append(updates, fmt.Sprintf("aur/%s %s -> %s", aurPkg.Name, localVer, aurPkg.Version))
 		}
 	}
