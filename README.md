@@ -29,6 +29,7 @@ graph LR
 
 * **Zero Lag:** Updates are fetched asynchronously by the daemon. The client retrieves cached updates via D-Bus instantly.
 * **No Database Locks:** Utilizes the safe `checkupdates` script under the hood, which operates on a temporary database directory.
+* **Accurate AUR Versioning:** Uses an in-memory ALPM version comparator (matching Arch's `vercmp`) to accurately detect AUR upgrades without subprocess overhead.
 * **Smart Version Coloring:** Compares old and new version strings to color-code updates based on whether they are major, minor, patch, or revision updates.
 * **Clean Column Alignment:** Tooltip aligns packages and versions into neat, monospaced columns.
 * **Push Notifications:** The client listens for D-Bus signals so that the bar UI updates *instantly* the moment the daemon detects a change.
@@ -45,24 +46,30 @@ Ensure you have the following tools installed on your Arch system:
 * `pacman` (obviously)
 * `pacman-contrib` (provides the `checkupdates` utility)
 
-### Compilation
+### Compilation & Installation
 
-Clone the repository and compile the binaries:
+Clone the repository and compile the binaries using the provided `Makefile`:
 
 ```bash
 git clone https://github.com/lmcanavals/waybar-updates-btw.git
 cd waybar-updates-btw
 
-# Build the binaries
-go build -o build/updates-fetch ./cmd/updates-fetch
-go build -o build/updates-query ./cmd/updates-query
+# Build both binaries into build/
+make build
+
+# Run unit tests
+make test
+
+# Install binaries into ~/.local/bin/ (or PREFIX=/usr/local make install)
+make install
 ```
 
-After compilation, copy the binaries into your system path (e.g., `~/.local/bin/` or `/usr/local/bin/`):
+Alternatively, you can build manually with `go`:
 
 ```bash
-cp build/updates-fetch ~/.local/bin/
-cp build/updates-query ~/.local/bin/
+go build -o build/updates-fetch ./cmd/updates-fetch
+go build -o build/updates-query ./cmd/updates-query
+cp build/updates-fetch build/updates-query ~/.local/bin/
 ```
 
 ---
@@ -116,6 +123,7 @@ You can customize `updates-query` output and color scheme using flags:
 
 | Flag | Default | Description |
 | :--- | :--- | :--- |
+| `-check-now` | `false` | Triggers an immediate full check on the `updates-fetch` daemon, resets periodic timers, and exits. |
 | `-interval` | `120` | Interval between active D-Bus queries in seconds. |
 | `-raw-output` | `false` | Disables formatting the tooltip text into aligned columns. |
 | `-no-color` | `false` | Disables coloring packages by version change category. |
@@ -135,7 +143,8 @@ Add the custom module to your Waybar configuration (usually `~/.config/waybar/co
     "exec": "~/.local/bin/updates-query",
     "return-type": "json",
     "restart-interval": 0, // D-Bus will automatically trigger refreshes
-    "on-click": "kitty -e yay -Syu" // Or your favorite terminal and AUR helper
+    "on-click": "kitty -e yay -Syu", // Left-click to upgrade
+    "on-click-right": "~/.local/bin/updates-query -check-now" // Right-click to trigger instant refresh
 }
 ```
 
@@ -166,9 +175,28 @@ For developers looking to integrate other tools or write their own frontends, th
 
 * **Bus Name:** `org.lmcs.DBus.UpdatesBtw`
 * **Object Path:** `/org/lmcs/DBus/UpdatesBtw/GetUpdates`
-* **Interface:** `org.lmcs.DBus.UpdatesBtw.UpdatesInterface`
+* **Interfaces:**
+  * `org.lmcs.DBus.UpdatesBtw.UpdatesInterface` (Main application interface)
+  * `org.freedesktop.DBus.Introspectable` (Standard D-Bus XML introspection)
+
+You can inspect the object structure at any time:
+```bash
+busctl --user introspect org.lmcs.DBus.UpdatesBtw /org/lmcs/DBus/UpdatesBtw/GetUpdates
+```
 
 ### Methods
+
+#### `CheckNow()`
+
+Immediately triggers an asynchronous full check on both Pacman (`checkupdates`) and AUR packages concurrently.
+* Resets the periodic Pacman (1m) and AUR (5m) timers as well as the Pacman 10-iteration fast/full cycle.
+* Automatically emits the `InfoUpdated` signal once completed, even if the package list did not change.
+* Safely debounces concurrent requests if a check is already underway.
+
+Example CLI invocation:
+```bash
+busctl --user call org.lmcs.DBus.UpdatesBtw /org/lmcs/DBus/UpdatesBtw/GetUpdates org.lmcs.DBus.UpdatesBtw.UpdatesInterface CheckNow
+```
 
 #### `GetUpdates(clientVersion int64) (string, error)`
 
