@@ -16,11 +16,9 @@ import (
 //   - ok: true if the check succeeded and the list is valid; false if no change or an error occurred
 //   - err: non-nil if checkupdates returned an error exit status (other than 2)
 func Check(fullSync bool) ([]string, bool, error) {
-	var args []string
-	if fullSync {
-		args = []string{"checkupdates", "--nocolor"}
-	} else {
-		args = []string{"checkupdates", "--nosync", "--change", "--nocolor"}
+	args := []string{"checkupdates", "--nocolor"}
+	if !fullSync {
+		args = append(args, []string{"--nosync", "--change"}...)
 	}
 
 	cmd := exec.Command(args[0], args[1:]...)
